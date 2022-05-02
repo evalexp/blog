@@ -1,0 +1,74 @@
+name: Blog CI
+
+on:
+  push:
+    tags:
+      - '*-build'
+
+jobs:
+  build:
+    name: Push Docker image to Harbor
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v2
+
+      - name: Get Tag
+        id: meta
+        uses: docker/metadata-action@v3
+        with:
+          images: |
+            registry.cn-shanghai.aliyuncs.com/evalexp-private/blog
+
+      - name: Setup Nodejs
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+
+      - name: Install Hexo
+        run: npm install hexo -g
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate Blog
+        run: hexo g
+
+      - name: Login Registry
+        uses: docker/login-action@v1
+        with:
+          registry: registry.cn-shanghai.aliyuncs.com
+          username: ${{ secrets.ALIYUN_USER }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v2
+        env:
+          tag: ${{ steps.get_tag.outputs.tag }}
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Upload Script
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.SSHUSER }}
+          password: ${{ secrets.SSHPASSWORD }}
+          port: ${{ secrets.PORT }}
+          source: "Deploy2KNative.sh"
+          target: "/tmp"
+
+      - name: Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.SSHUSER }}
+          password: ${{ secrets.SSHPASSWORD }}
+          port: ${{ secrets.PORT }}
+          script: |
+            bash /tmp/Deploy2KNative.sh
+            rm /tmp/Deploy2KNative.sh

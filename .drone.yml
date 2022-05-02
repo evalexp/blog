@@ -1,0 +1,46 @@
+kind: pipeline
+type: docker
+name: blog-pipeline
+
+steps:
+  - name: generate
+    image: node:16-alpine
+    environment:
+      NPM_MIRROR:
+        from_secret: NPM_MIRROR
+    commands:
+      - npm config set registry $NPM_MIRROR
+      - npm install hexo -g
+      - npm install
+      - hexo g
+      - tar -czvf publish.tar.gz -C public .
+
+  - name: upload
+    image: appleboy/drone-scp
+    settings:
+      host:
+        from_secret: SSH_HOST
+      username:
+        from_secret: SSH_USER
+      password:
+        from_secret: SSH_PASSWORD
+      port:
+        from_secret: SSH_PORT
+      target: /tmp
+      source:
+        - publish.tar.gz
+        - deploy.sh
+
+  - name: deploy
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: SSH_HOST
+      username:
+        from_secret: SSH_USER
+      password:
+        from_secret: SSH_PASSWORD
+      port:
+        from_secret: SSH_PORT
+      script:
+        - bash /tmp/deploy.sh
