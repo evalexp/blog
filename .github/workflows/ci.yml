@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Push Docker image to Harbor
+    name: Build Docker image and Deploy to KNative
     runs-on: ubuntu-latest
 
     steps:
