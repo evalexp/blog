@@ -192,6 +192,12 @@ kubectl apply -f kube-flannel.yml
 
 等待片刻，然后查看各个Pods状态，应该都是Ready的。
 
+#### 允许Master节点创建Pod
+
+```bash
+kubectl taint nodes --all node-role.kubernetes.io/master-
+```
+
 ## 安装KNative
 
 ### 国内云安装KNative
