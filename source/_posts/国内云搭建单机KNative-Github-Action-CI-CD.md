@@ -19,7 +19,7 @@ typora-root-url: 国内云搭建单机KNative-Github-Action-CI-CD
 >
 > 选用KNative Serverless平台的主要原因是这个平台成熟好用，并且基于镜像的服务迁移会比基于Gitea + Drone的服务迁移方便快捷。
 
-## Minikube安装
+## K8S安装
 
 KNative原生支持的平台是Kubernetes，可以快速方便的部署到集群中，但是这就为单机部署造成了一定的困难性。
 
@@ -84,6 +84,114 @@ kubectl get pods -n kube-system
 
 在Docker里应该看得到一个name为minikube的容器正在运行。
 
+### 国内云通过Kubeadm初始化K8S
+
+#### 添加K8S源
+
+修改apt的sources.list：
+
+```bash
+evalexp@VM-16-6-ubuntu:~/knative$ cat /etc/apt/sources.list
+deb http://mirrors.tencentyun.com/ubuntu/ focal main restricted universe multiverse
+deb http://mirrors.tencentyun.com/ubuntu/ focal-security main restricted universe multiverse
+deb http://mirrors.tencentyun.com/ubuntu/ focal-updates main restricted universe multiverse
+#deb http://mirrors.tencentyun.com/ubuntu/ focal-proposed main restricted universe multiverse
+#deb http://mirrors.tencentyun.com/ubuntu/ focal-backports main restricted universe multiverse
+deb-src http://mirrors.tencentyun.com/ubuntu/ focal main restricted universe multiverse
+deb-src http://mirrors.tencentyun.com/ubuntu/ focal-security main restricted universe multiverse
+deb-src http://mirrors.tencentyun.com/ubuntu/ focal-updates main restricted universe multiverse
+#deb-src http://mirrors.tencentyun.com/ubuntu/ focal-proposed main restricted universe multiverse
+#deb-src http://mirrors.tencentyun.com/ubuntu/ focal-backports main restricted universe multiverse
+deb http://mirrors.tencentyun.com/kubernetes/apt kubernetes-xenial main
+```
+
+增加最下面的：`deb http://mirrors.tencentyun.com/kubernetes/apt kubernetes-xenial main`
+
+然后添加签名：
+
+```bash
+curl -s https://mirrors.aliyun.com/kubernetes/apt/doc/apt-key.gpg | sudo apt-key add -
+```
+
+#### 安装K8S工具
+
+```bash
+sudo apt-get update 
+sudo apt-get install kubectl kubeadm kubelet
+```
+
+#### 初始化K8S
+
+关闭Swap和防火墙，修改Docker的Cgroups为Systemd：
+
+```bash
+sudo ufw disable
+sudo systemctl disable ufw
+sudo swapoff -a
+# 修改 /etc/fstab
+# 将类似/dev/disk/by-uuid/b986dc3b-6b82-44d5-acb8-6cbad5e357d5 / ext4 defaults 0 0这行内容的注释掉
+```
+
+然后修改Docker的cgroups：
+
+```bash
+{
+"registry-mirrors": [
+ "https://mirror.ccs.tencentyun.com"
+],
+"exec-opts": ["native.cgroupdriver=systemd"]
+}
+```
+
+重启相关程序：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+开始初始化K8S：
+
+```bash
+sudo kubeadm reset
+sudo kubeadm init --image-repository registry.aliyuncs.com/google_containers --pod-network-cidr=10.10.0.0/16
+```
+
+应该会看到下面的内容：
+
+```bash
+Your Kubernetes control-plane has initialized successfully!
+
+To start using your cluster, you need to run the following as a regular user:
+
+  mkdir -p $HOME/.kube
+  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+You should now deploy a pod network to the cluster.
+Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
+  <https://kubernetes.io/docs/concepts/cluster-administration/addons/>
+
+Then you can join any number of worker nodes by running the following on each as root:
+
+kubeadm join 机器IP:6443 --token XXXX.XXXXX \\
+    --discovery-token-ca-cert-hash sha256:XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+```
+
+按照提示配置非root操作即可。
+
+#### 安装网络插件
+
+这里选择的是Flannel：
+
+```bash
+curl -LO https://ghproxy.com/https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+kubectl apply -f kube-flannel.yml
+```
+
+等待片刻，然后查看各个Pods状态，应该都是Ready的。
+
 ## 安装KNative
 
 ### 国内云安装KNative
@@ -143,7 +251,7 @@ NAME      TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)                
 kourier   LoadBalancer   10.106.138.38   <Pending>       80:30916/TCP,443:32096/TCP   40h
 ```
 
-#### 使用Minikube Tunnel获取External IP
+##### 使用Minikube Tunnel获取External IP
 
 > 可以使用普通权限的用户，但是注意输入密码
 
@@ -165,6 +273,38 @@ evalexp    19585       1  0 May01 ?        00:02:27 minikube tunnel -c
 NAME      TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)                      AGE
 kourier   LoadBalancer   10.106.138.38   10.106.138.38   80:30916/TCP,443:32096/TCP   40h
 ```
+
+##### 单机K8S获取External IP
+
+需要安装MetalLB：
+
+```bash
+curl -LO https://ghproxy.com/https://raw.githubusercontent.com/metallb/metallb/v0.12.1/manifests/namespace.yaml
+curl -LO https://ghproxy.com/https://raw.githubusercontent.com/metallb/metallb/v0.12.1/manifests/metallb.yaml
+kubectl apply -f namespace.yaml
+kubectl apply -f metallb.yaml
+```
+
+此时还无法获取到具体的External IP，为其分配IP池：
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    address-pools:
+    - name: default
+      protocol: layer2
+      addresses:
+      - 192.168.1.240-192.168.1.250
+```
+
+保存该文件，使用`kubectl apply -f addrpool.yaml`。
+
+此时查看应该可以看到IP地址了。
 
 #### 确认安装情况
 
@@ -295,7 +435,9 @@ sudo install kn-linux-amd64 /usr/bin/kn
 kn service create hello --image gcr.lank8s.cn/knative-samples/helloworld-go --port 8080 --env TARGET=KNative!
 ```
 
-应该会输入如下：
+> 如果部署失败，说明不是使用Minikube安装的KNative，请看下面[单机K8S的异常](#单机K8S的异常)解决
+
+应该会输出如下：
 
 ```bash
 Creating service 'hello' in namespace 'default':
@@ -332,6 +474,52 @@ default            hello-00001-deployment-5f8b4b85df-2ks4k   2/2     Terminating
 ```
 
 然后Pods被销毁。
+
+### 单机K8S的异常
+
+当创建服务时，可能会出现如下异常：
+
+```bash
+Creating service 'hello' in namespace 'default':
+
+  0.101s The Route is still working to reflect the latest desired specification.
+  0.120s ...
+  0.158s Configuration "hello" is waiting for a Revision to become ready.
+ 10.113s Revision "hello-00001" failed with message: Unable to fetch image "gcr.lank8s.cn/knative-samples/helloworld-go": failed to resolve image to digest: Get "https://gcr.lank8s.cn/v2/": context deadline exceeded.
+ 10.148s Configuration "hello" does not have any ready Revision.
+Error: RevisionFailed: Revision "hello-00001" failed with message: Unable to fetch image "gcr.lank8s.cn/knative-samples/helloworld-go": failed to resolve image to digest: Get "https://gcr.lank8s.cn/v2/": context deadline exceeded.
+Run 'kn --help' for usage
+```
+
+具体原因未知，出现该情况时，需要修改一下KNative Serving的Configmap配置：
+
+```bash
+kubectl -n knative-serving edit configmap config-deployment
+```
+
+如图所示，你应该在data下面添加一个`registries-skipping-tag-resolving`，然后将自己的私有Registry地址或者可能会用到的Registry地址加进去。
+
+![image-20220504150309225](./image-20220504150309225.png)
+
+添加后，你应该可以看到：
+
+```bash
+evalexp@VM-16-6-ubuntu:~$ kn service create blog --image registry.cn-shanghai.aliyuncs.com/evalexp-private/blog --port 80 --pull-secret=aliyunkey --scale-min=1 --scale-max=2
+Creating service 'blog' in namespace 'default':
+
+  0.080s The Route is still working to reflect the latest desired specification.
+  0.213s ...
+  0.289s Configuration "blog" is waiting for a Revision to become ready.
+  2.836s ...
+  2.926s Ingress has not yet been reconciled.
+  3.075s Waiting for load balancer to be ready
+  3.203s Ready to serve.
+
+Service 'blog' created to latest revision 'blog-00001' is available at URL:
+http://blog.default.serverless.me
+```
+
+这样就部署成功了。
 
 ## Github Action 构建镜像
 
