@@ -325,3 +325,95 @@ S:4:"use\72";
 
 ##### 例子
 
+看一个简单的例子：
+
+```php
+<?php
+//flag is in flag.php
+error_reporting(1);
+class Read {
+    public $var;
+    public function file_get($value)
+    {
+        $text = base64_encode(file_get_contents($value));
+        return $text;
+    }
+    public function __invoke(){
+        $content = $this->file_get($this->var);
+        echo $content;
+    }
+}
+
+class Show
+{
+    public $source;
+    public $str;
+    public function __construct($file='index.php')
+    {
+        $this->source = $file;
+        echo $this->source.'Welcome'."<br>";
+    }
+    public function __toString()
+    {
+        return $this->str['str']->source;
+    }
+
+    public function _show()
+    {
+        if(preg_match('/gopher|http|ftp|https|dict|\.\.|flag|file/i',$this->source)) {
+            die('hacker');
+        } else {
+            highlight_file($this->source); 
+        }
+
+    }
+
+    public function __wakeup()
+    {
+        if(preg_match("/gopher|http|file|ftp|https|dict|\.\./i", $this->source)) {
+            echo "hacker";
+            $this->source = "index.php";
+        }
+    }
+}
+
+class Test
+{
+    public $p;
+    public function __construct()
+    {
+        $this->p = array();
+    }
+
+    public function __get($key)
+    {
+        $function = $this->p;
+        return $function();
+    }
+}
+
+if(isset($_GET['hello']))
+{
+    unserialize($_GET['hello']);
+}
+else
+{
+    $show = new Show('pop3.php');
+    $show->_show();
+}
+```
+
+从这个例子来看一下这里的pop链构造的技巧。
+
+首先先注意，上面的代码一共有三个类，分别为`Read`、`Show`和`Test`，容易发现在类`Read`中，其`__invoke`方法读取了`$value`路径的文件并显示。
+
+我们的目的是去取得Flag，而题目提示flag在flag.php中，因此我们这里最终利用的肯定是这里的`Read`类的`__invoke`方法了。
+
+在前面的魔术方法总结中提到过，当 一个对象被当成函数执行时，就会调用其`__invoke`方法。
+
+那么接下来去审查一下代码，看看哪个地方将对象作为了函数调用(在PHP中，弱类型会导致这里的寻找过程比较困难，需要耐心)，不难看到，在`Test`类中，其`__get`方法这里，直接将`$this->p`赋给了`$function`，随后调用了`$function`，也就是相当于`return $this->p();`，那么我们只需要控制这里的`$this->p`为`Read`对象。
+
+这里的话，注意到，我们已经连起来了一条链了`Test::__get ==> Read::__invoke`。
+
+那么我们如何去触发`Test::__get`呢？也是前面的魔术方法提到过的，`__get`方法是读取不可访问属性时调用的。
+
