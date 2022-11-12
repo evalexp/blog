@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build Docker image and Deploy to KNative
+    name: Build Docker image and auto deploy
     runs-on: ubuntu-latest
 
     steps:

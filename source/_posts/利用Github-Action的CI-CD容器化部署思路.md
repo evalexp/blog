@@ -507,3 +507,21 @@ services:
 ```
 
 此时通过推送最新博客的`source`至`Github`触发构建，即可完成整套`CI/CD`流程。
+
+效果如下，对于`Github Action`：
+
+![image-20221112224050542](./image-20221112224050542.png)
+
+前往阿里云查看可以发现：
+
+![image-20221112224125862](./image-20221112224125862.png)
+
+已经构建推送成功。
+
+而`Watchtower`的日志输出：
+
+```log
+watchtower    | time="2022-11-12T14:38:25Z" level=info msg="Session done" Failed=0 Scanned=2 Updated=1 notify=no
+```
+
+刷新博客，可以发现已经成功更新了。
