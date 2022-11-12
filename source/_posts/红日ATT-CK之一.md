@@ -16,7 +16,7 @@ date: 2022-04-09 14:53:04
 ## 红日ATT&CK 靶场一
 
 > 下载地址：[漏洞详情 (qiyuanxuetang.net)](http://vulnstack.qiyuanxuetang.net/vuln/detail/2/)
->
+> 
 > 共13G，百度网盘资源。
 
 ### 环境配置
@@ -247,7 +247,6 @@ net group "domain admins" /domain  查看域管理员的名字
 net group "domain computers" /domain  查看域中的其他主机名
 
 net group "doamin controllers" /domain  查看域控制器（可能有多台）
-
 ```
 
 使用`net config Workstation`查看比较全面的信息：
@@ -415,8 +414,6 @@ owa$          GOD.ORG  f1 67 2b ab 2a cf b9 80 42 1e d0 c8 ee 8a 21 40 e8 69 b6 
                        0c 2e 88 8b f8 f3 8e 3e 09 8c ae 28 52 d6 e9 af db f8 6e 17 4d d5 dc 71 79 d1 30 28 2e 79 ab cb 55 1a 75 76 22 bb 0d ca 07 7f 2f 6d
                        d5 b7 7c 2a b2 9a e6 7e e4 5a a8 5b 43 0e 73 ae aa c8 e7 64 3b 31 ff 85 78 e9 57 34 fa 2d 83 7d 22 1f e3 c1 1e 5c 02 37 54 ba 56 d0
                        41 23 be ac 74 1b 2d f6 b6 6f 08 74 fe 34 26 7f 97 4f 00 38
-
-
 ```
 
 可以看到密码了，直接远程登录。
@@ -436,4 +433,3 @@ owa$          GOD.ORG  f1 67 2b ab 2a cf b9 80 42 1e d0 c8 ee 8a 21 40 e8 69 b6 
   * 网上有些做法是利用MS17-010添加用户啥的，但是拿到域控了实际就可以修改该计算机的配置，还需要大费周章去利用漏洞吗？
 
 其余的问题应该都在本文有详细讲解了。
-
