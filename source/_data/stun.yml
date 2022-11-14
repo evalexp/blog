@@ -369,7 +369,7 @@ codeblock:
   style: carbon
   # The theme of code highlight.
   # Optional values: light | dark | ocean
-  highlight: light
+  highlight: dark
   # Whether to wrap when code overflow.
   word_wrap: true
 
